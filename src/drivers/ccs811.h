@@ -296,4 +296,28 @@ ccs811_error_t ccs811_read_data_robust(ccs811_t *dev, ccs811_data_t *data);
  */
 void ccs811_get_i2c_stats(ccs811_t *dev, uint32_t *retries, uint32_t *failures);
 
+/**
+ * @brief Read baseline value from sensor
+ *
+ * The baseline represents the sensor's calibration state.
+ * Should be read after 20-minute warm-up period.
+ *
+ * @param dev Pointer to device handle
+ * @param baseline Pointer to store baseline value (16-bit)
+ * @return CCS811_OK on success, error code on failure
+ */
+ccs811_error_t ccs811_read_baseline(ccs811_t *dev, uint16_t *baseline);
+
+/**
+ * @brief Write baseline value to sensor
+ *
+ * Restores a previously saved baseline to the sensor.
+ * Should only be used with baseline values < 24 hours old.
+ *
+ * @param dev Pointer to device handle
+ * @param baseline Baseline value to write (16-bit)
+ * @return CCS811_OK on success, error code on failure
+ */
+ccs811_error_t ccs811_write_baseline(ccs811_t *dev, uint16_t baseline);
+
 #endif // CCS811_H
