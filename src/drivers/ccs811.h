@@ -108,6 +108,9 @@ typedef struct {
     uint16_t fw_boot_version;   // Firmware bootloader version
     uint16_t fw_app_version;    // Firmware application version
     ccs811_mode_t mode;         // Current measurement mode
+    // Power management (iteration 6)
+    int wake_pin;               // GPIO pin for WAKE control (-1 = not used)
+    bool use_wake_pin;          // Enable WAKE pin power management
 } ccs811_t;
 
 /**
@@ -319,5 +322,25 @@ ccs811_error_t ccs811_read_baseline(ccs811_t *dev, uint16_t *baseline);
  * @return CCS811_OK on success, error code on failure
  */
 ccs811_error_t ccs811_write_baseline(ccs811_t *dev, uint16_t baseline);
+
+/**
+ * @brief Enable WAKE pin power management
+ *
+ * Configures a GPIO pin to control the sensor's WAKE pin.
+ * When enabled, the WAKE pin is asserted LOW before I2C transactions
+ * and released HIGH after, allowing the sensor to enter low-power mode.
+ *
+ * @param dev Pointer to device handle
+ * @param wake_pin GPIO pin number for WAKE control
+ * @return CCS811_OK on success, error code on failure
+ */
+ccs811_error_t ccs811_enable_wake_pin(ccs811_t *dev, int wake_pin);
+
+/**
+ * @brief Disable WAKE pin power management
+ *
+ * @param dev Pointer to device handle
+ */
+void ccs811_disable_wake_pin(ccs811_t *dev);
 
 #endif // CCS811_H

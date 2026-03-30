@@ -1,17 +1,18 @@
 /**
  * @file main.c
- * @brief CCS811 Air Quality Sensor - Iteration 5: Baseline Calibration
+ * @brief CCS811 Air Quality Sensor - Iteration 6: Power Optimization
  *
  * Improvements in this iteration:
- * - Read baseline register after 20-min warm-up and store to flash
- * - Restore baseline on boot if < 24 hours old
- * - ENV_DATA compensation with hardcoded 20°C / 50% RH
- * - Track eco2_drift (max - min of 10-sample moving average)
- * - [BASELINE] serial output with stored_baseline_hex, restored, baseline_age_s
+ * - WAKE pin control (GP6): assert LOW before I2C, HIGH after for low-power sleep
+ * - Switch to Mode 3 (60s interval) for duty-cycled operation (Mode 2 for testing)
+ * - Sleep Pico between measurements to reduce power consumption
+ * - Track wake_cycles, avg_wake_time_us, duty_cycle_pct
+ * - [POWER] serial output with power management statistics
  *
  * Hardware:
  * - Raspberry Pi Pico (RP2040)
  * - Joy-IT SEN-CCS811V1 sensor on I2C0 (GP4=SDA, GP5=SCL)
+ * - WAKE pin connected to GP6 (was GND in previous iterations)
  * - Pico Debug Probe for SWD debugging and UART capture
  *
  * Output: UART0 at 115200 baud (captured by debug probe)
@@ -36,9 +37,14 @@
 // Onboard LED pin
 #define LED_PIN         25
 
-// Measurement configuration
-#define SENSOR_MODE             CCS811_MODE_1SEC
-#define MEASURE_INTERVAL_MS     1000
+// Power management (iteration 6)
+#define WAKE_PIN        6       // GP6 (pin 9) - controls sensor WAKE
+
+// Measurement configuration (iteration 6)
+// NOTE: Using Mode 2 (10s) for 60s test capture to get enough samples
+//       Default for production should be Mode 3 (60s) for maximum power savings
+#define SENSOR_MODE             CCS811_MODE_10SEC
+#define MEASURE_INTERVAL_MS     10000
 
 // Signal conditioning parameters (iteration 4)
 #define FILTER_WINDOW_SIZE      5       // Moving average window (N=5)
@@ -132,6 +138,11 @@ static uint16_t drift_ma_buffer[DRIFT_MA_WINDOW];
 static uint32_t drift_ma_index = 0;
 static uint32_t drift_ma_count = 0;
 static uint16_t eco2_drift = 0;
+
+// Power tracking (iteration 6)
+static uint32_t wake_cycles = 0;
+static uint64_t total_wake_time_us = 0;
+static uint32_t total_elapsed_ms = 0;
 
 /**
  * @brief Initialize I2C bus
@@ -481,10 +492,19 @@ static void print_summary(uint32_t uptime_s) {
 
     bool warmed_up = ccs811_is_warmed_up(&sensor);
 
+    // Power statistics (iteration 6)
+    uint32_t avg_wake_time_us = (wake_cycles > 0) ? (uint32_t)(total_wake_time_us / wake_cycles) : 0;
+    float duty_cycle_pct = (total_elapsed_ms > 0) ?
+        ((float)total_wake_time_us / 1000.0f) / (float)total_elapsed_ms * 100.0f : 0.0f;
+
     printf("[SUMMARY] reads=%lu fails=%lu outliers=%lu fail_rate=%.2f eco2_mean=%.1f eco2_stddev=%.1f tvoc_mean=%.1f tvoc_stddev=%.1f eco2_drift=%u uptime_s=%lu warmed_up=%s\n",
            total_reads, total_fails, total_outliers, fail_rate,
            eco2_mean, eco2_stddev, tvoc_mean, tvoc_stddev, eco2_drift, uptime_s,
            warmed_up ? "true" : "false");
+
+    printf("[POWER] wake_cycles=%lu avg_wake_time_us=%lu duty_cycle_pct=%.2f measurement_mode=%s\n",
+           wake_cycles, avg_wake_time_us, duty_cycle_pct,
+           get_mode_name(sensor.mode));
 }
 
 int main() {
@@ -499,8 +519,9 @@ int main() {
     sleep_ms(100);
 
     printf("\n");
-    printf("[INFO] CCS811 Iteration 5: Baseline Calibration\n");
+    printf("[INFO] CCS811 Iteration 6: Power Optimization\n");
     printf("[INFO] I2C: GP%d (SDA), GP%d (SCL), %d Hz\n", I2C_SDA_PIN, I2C_SCL_PIN, I2C_FREQ_HZ);
+    printf("[INFO] WAKE pin: GP%d (controls low-power sleep)\n", WAKE_PIN);
     printf("[INFO] Filter: MA window=%d, outlier threshold=%.1f sigma\n",
            FILTER_WINDOW_SIZE, OUTLIER_SIGMA_THRESHOLD);
     printf("[INFO] Baseline: flash storage enabled, max age = 24h\n");
@@ -522,6 +543,12 @@ int main() {
     printf("[INFO] CCS811 initialized! HW_ID=0x%02X HW_VER=0x%02X\n",
            ccs811_get_hw_id(&sensor),
            ccs811_get_hw_version(&sensor));
+
+    // Enable WAKE pin power management (iteration 6)
+    err = ccs811_enable_wake_pin(&sensor, WAKE_PIN);
+    if (err == CCS811_OK) {
+        printf("[INFO] WAKE pin enabled on GP%d (sensor can sleep between measurements)\n", WAKE_PIN);
+    }
 
     // Load baseline from flash if available and < 24h old
     if (load_baseline_from_flash(&stored_baseline, &baseline_age_s)) {
@@ -546,20 +573,25 @@ int main() {
                ENV_TEMP_DEFAULT, ENV_HUMIDITY_DEFAULT);
     }
 
-    printf("[INFO] Starting measurement loop with baseline calibration...\n");
+    printf("[INFO] Starting measurement loop with power optimization...\n");
+    printf("[INFO] Measurement interval: %d ms (sensor will sleep between readings)\n", MEASURE_INTERVAL_MS);
 
     uint32_t boot_time_ms = to_ms_since_boot(get_absolute_time());
     uint32_t last_summary_s = 0;
 
     // Main measurement loop
     while (true) {
+        // Track wake cycle start time (iteration 6)
+        uint64_t cycle_start_us = time_us_64();
+
         uint32_t now_ms = to_ms_since_boot(get_absolute_time());
         uint32_t uptime_ms = now_ms - boot_time_ms;
         uint32_t uptime_s = uptime_ms / 1000;
+        total_elapsed_ms = uptime_ms;
 
         bool warming_up = !ccs811_is_warmed_up(&sensor);
 
-        // Read raw data
+        // Read raw data (WAKE pin automatically managed by driver)
         ccs811_data_t data = {0};
         err = ccs811_read_data_robust(&sensor, &data);
 
@@ -640,6 +672,14 @@ int main() {
             last_summary_s = uptime_s;
         }
 
+        // Track wake time for this cycle (iteration 6)
+        uint64_t cycle_end_us = time_us_64();
+        uint64_t cycle_duration_us = cycle_end_us - cycle_start_us;
+        total_wake_time_us += cycle_duration_us;
+        wake_cycles++;
+
+        // Sleep between measurements (sensor also sleeps via WAKE pin)
+        // This dramatically reduces power consumption
         sleep_ms(MEASURE_INTERVAL_MS);
     }
 
