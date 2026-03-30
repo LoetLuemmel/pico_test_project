@@ -1,0 +1,11 @@
+{
+    "cmake.configureOnOpen": false,
+    "cmake.generator": "Unix Makefiles",
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "files.associations": {
+        "*.h": "c",
+        "*.c": "c"
+    },
+    "cortex-debug.openocdPath": "openocd",
+    "cortex-debug.gdbPath": "arm-none-eabi-gdb"
+}

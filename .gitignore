@@ -1,0 +1,14 @@
+# Build output
+build/
+
+# IDE
+.vscode/.cache/
+.vscode/*.log
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.swp
+*.swo
+*~
