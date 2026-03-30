@@ -470,3 +470,35 @@ void ccs811_get_i2c_stats(ccs811_t *dev, uint32_t *retries, uint32_t *failures) 
         if (failures) *failures = dev->i2c_failures;
     }
 }
+
+ccs811_error_t ccs811_read_baseline(ccs811_t *dev, uint16_t *baseline) {
+    if (!dev || !dev->initialized || !baseline) {
+        return CCS811_ERR_I2C;
+    }
+
+    uint8_t buf[2];
+    if (ccs811_read_reg(dev, CCS811_REG_BASELINE, buf, 2) != 0) {
+        return CCS811_ERR_I2C;
+    }
+
+    // Baseline is stored MSB first
+    *baseline = ((uint16_t)buf[0] << 8) | buf[1];
+    return CCS811_OK;
+}
+
+ccs811_error_t ccs811_write_baseline(ccs811_t *dev, uint16_t baseline) {
+    if (!dev || !dev->initialized) {
+        return CCS811_ERR_I2C;
+    }
+
+    // Baseline is written MSB first
+    uint8_t buf[2];
+    buf[0] = (baseline >> 8) & 0xFF;
+    buf[1] = baseline & 0xFF;
+
+    if (ccs811_write_reg(dev, CCS811_REG_BASELINE, buf, 2) != 0) {
+        return CCS811_ERR_I2C;
+    }
+
+    return CCS811_OK;
+}

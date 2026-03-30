@@ -28,6 +28,8 @@ target_link_libraries(pico_test
     hardware_gpio
     hardware_adc
     hardware_i2c
+    hardware_flash
+    hardware_sync
 )
 
 # Enable UART output (debug probe), disable USB output
