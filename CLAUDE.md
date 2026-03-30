@@ -253,3 +253,79 @@ Each iteration is a separate branch and PR. The PR description **must** include 
 - Debug probe appears as `/dev/ttyACM0` (UART) — adjust in harness.py if needed
 - Python 3.8+ with `pyserial` installed for the test harness
 - `gh` CLI authenticated for PR creation
+
+
+
+## Serial port safety rules (macOS)
+
+### CRITICAL — read this before any serial access
+
+Claude Code has crashed repeatedly due to unsafe serial port access. Follow these rules strictly.
+
+### Finding the correct port
+
+The debug probe exposes TWO USB interfaces:
+- **CMSIS-DAP** (SWD flashing) — do NOT open this as a serial port
+- **UART bridge** — this is the one that carries `[METRIC]` lines
+
+To identify the correct port:
+
+```bash
+# Step 1: List all available serial ports
+ls /dev/cu.usbmodem* 2>/dev/null || echo "No USB serial ports found"
+
+# Step 2: Check which port is the UART bridge (non-destructive)
+for port in /dev/cu.usbmodem*; do
+  echo "=== $port ==="
+  stty -f "$port" 2>/dev/null && echo "accessible" || echo "busy/locked"
+done
+```
+
+The correct UART port on this Mac is likely: `/dev/cu.usbmodem4302` or similar.
+Update this line once confirmed: **UART_PORT=/dev/cu.usbmodemXXXX**
+
+### Safe serial capture — NEVER use plain `cat`
+
+Plain `cat /dev/cu.usbmodemXXXX` does NOT set the baud rate and will hang or crash.
+
+**Always use Python with pyserial for serial capture:**
+
+```bash
+python3 -c "
+import serial, time, sys
+try:
+    ser = serial.Serial('PORT_HERE', 115200, timeout=2)
+    end = time.time() + 65
+    while time.time() < end:
+        line = ser.readline().decode('utf-8', errors='replace').strip()
+        if line:
+            print(line)
+            sys.stdout.flush()
+    ser.close()
+except serial.SerialException as e:
+    print(f'Serial error: {e}', file=sys.stderr)
+    sys.exit(1)
+except KeyboardInterrupt:
+    ser.close()
+"
+```
+
+### Rules
+
+1. **NEVER** use `cat`, `timeout cat`, or `head` on serial ports — they don't set baud rate and cause hangs
+2. **NEVER** open a port without first checking it exists: `test -e /dev/cu.usbmodemXXXX`
+3. **ALWAYS** use pyserial with a `timeout` parameter on the Serial object
+4. **ALWAYS** wrap serial access in try/except — the port may be busy, disconnected, or locked
+5. **ALWAYS** close the port in a finally block
+6. If `pyserial` is not installed, run: `pip3 install pyserial`
+7. If a serial capture returns zero lines, do NOT retry more than twice — report the issue instead
+8. The baud rate is **115200** — never omit this
+
+### test/harness.py requirements
+
+The test harness must:
+- Accept the port as a command-line argument with a sensible default
+- Set a hard timeout (65 seconds) using pyserial's timeout parameter
+- NOT use subprocess `timeout` wrapping — it doesn't reliably kill serial reads on macOS
+- Catch `serial.SerialException` and print a human-readable error
+- Exit cleanly on Ctrl+C
