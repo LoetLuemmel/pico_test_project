@@ -88,6 +88,9 @@ typedef struct {
 #define CCS811_I2C_RETRY_DELAY_2_MS 50
 #define CCS811_I2C_RETRY_DELAY_3_MS 200
 
+// Warm-up time in milliseconds (20 minutes)
+#define CCS811_WARMUP_TIME_MS   (20 * 60 * 1000)
+
 // Device handle
 typedef struct {
     i2c_inst_t *i2c;
@@ -99,10 +102,16 @@ typedef struct {
     uint32_t i2c_failures;      // Total I2C failures after all retries
     uint8_t last_error_id;      // Last ERROR_ID register value
     uint8_t last_status;        // Last STATUS register value
+    // Sensor info (iteration 3)
+    uint8_t hw_id;              // Hardware ID (should be 0x81)
+    uint8_t hw_version;         // Hardware version
+    uint16_t fw_boot_version;   // Firmware bootloader version
+    uint16_t fw_app_version;    // Firmware application version
+    ccs811_mode_t mode;         // Current measurement mode
 } ccs811_t;
 
 /**
- * @brief Initialize the CCS811 sensor
+ * @brief Initialize the CCS811 sensor with default mode (Mode 1 - 1 second)
  *
  * @param dev Pointer to device handle
  * @param i2c I2C instance (i2c0 or i2c1)
@@ -110,6 +119,26 @@ typedef struct {
  * @return CCS811_OK on success, error code on failure
  */
 ccs811_error_t ccs811_init(ccs811_t *dev, i2c_inst_t *i2c, uint8_t addr);
+
+/**
+ * @brief Initialize the CCS811 sensor with configurable measurement mode
+ *
+ * Performs the complete initialization sequence:
+ * 1. Wait 20ms for sensor power-on
+ * 2. Verify HW_ID reads 0x81
+ * 3. Read and store HW_VERSION, FW_BOOT_VERSION, FW_APP_VERSION
+ * 4. Check STATUS register for APP_VALID bit
+ * 5. Write APP_START command to register 0xF4
+ * 6. Verify STATUS FW_MODE bit is set (now in application mode)
+ * 7. Set the requested measurement mode
+ *
+ * @param dev Pointer to device handle
+ * @param i2c I2C instance (i2c0 or i2c1)
+ * @param addr I2C address (0x5A or 0x5B)
+ * @param mode Measurement mode (CCS811_MODE_*)
+ * @return CCS811_OK on success, error code on failure
+ */
+ccs811_error_t ccs811_init_with_mode(ccs811_t *dev, i2c_inst_t *i2c, uint8_t addr, ccs811_mode_t mode);
 
 /**
  * @brief Set the measurement mode
@@ -160,6 +189,38 @@ uint8_t ccs811_get_error_id(ccs811_t *dev);
  * @return Hardware ID (should be 0x81)
  */
 uint8_t ccs811_get_hw_id(ccs811_t *dev);
+
+/**
+ * @brief Get hardware version (cached from init)
+ *
+ * @param dev Pointer to device handle
+ * @return Hardware version byte
+ */
+uint8_t ccs811_get_hw_version(ccs811_t *dev);
+
+/**
+ * @brief Get firmware bootloader version (cached from init)
+ *
+ * @param dev Pointer to device handle
+ * @return Bootloader version (major.minor packed)
+ */
+uint16_t ccs811_get_fw_boot_version(ccs811_t *dev);
+
+/**
+ * @brief Get firmware application version (cached from init)
+ *
+ * @param dev Pointer to device handle
+ * @return Application version (major.minor packed)
+ */
+uint16_t ccs811_get_fw_app_version(ccs811_t *dev);
+
+/**
+ * @brief Get current measurement mode
+ *
+ * @param dev Pointer to device handle
+ * @return Current mode (CCS811_MODE_*)
+ */
+ccs811_mode_t ccs811_get_mode(ccs811_t *dev);
 
 /**
  * @brief Check if sensor warm-up period is complete (20 minutes)

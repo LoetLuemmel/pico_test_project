@@ -7,9 +7,6 @@
 #include "pico/stdlib.h"
 #include <string.h>
 
-// Warm-up time in milliseconds (20 minutes)
-#define CCS811_WARMUP_TIME_MS   (20 * 60 * 1000)
-
 // I2C timeout in microseconds
 #define CCS811_I2C_TIMEOUT_US   10000
 
@@ -107,11 +104,12 @@ static int ccs811_read_reg(ccs811_t *dev, uint8_t reg, uint8_t *data, size_t len
     return -1;
 }
 
-ccs811_error_t ccs811_init(ccs811_t *dev, i2c_inst_t *i2c, uint8_t addr) {
+ccs811_error_t ccs811_init_with_mode(ccs811_t *dev, i2c_inst_t *i2c, uint8_t addr, ccs811_mode_t mode) {
     if (!dev || !i2c) {
         return CCS811_ERR_I2C;
     }
 
+    // Initialize device handle
     dev->i2c = i2c;
     dev->addr = addr;
     dev->initialized = false;
@@ -120,46 +118,93 @@ ccs811_error_t ccs811_init(ccs811_t *dev, i2c_inst_t *i2c, uint8_t addr) {
     dev->i2c_failures = 0;
     dev->last_error_id = 0;
     dev->last_status = 0;
+    dev->hw_id = 0;
+    dev->hw_version = 0;
+    dev->fw_boot_version = 0;
+    dev->fw_app_version = 0;
+    dev->mode = CCS811_MODE_IDLE;
 
-    // Wait for sensor to be ready after power-on
+    // Step 1: Wait 20ms for sensor power-on stabilization
     sleep_ms(20);
 
-    // Step 1: Verify hardware ID
-    uint8_t hw_id = ccs811_get_hw_id(dev);
+    // Step 2: Verify hardware ID reads 0x81
+    uint8_t hw_id = 0;
+    if (ccs811_read_reg(dev, CCS811_REG_HW_ID, &hw_id, 1) != 0) {
+        return CCS811_ERR_I2C;
+    }
+    dev->hw_id = hw_id;
     if (hw_id != CCS811_HW_ID_VALUE) {
         return CCS811_ERR_HW_ID;
     }
 
-    // Step 2: Check if valid application firmware is loaded
-    uint8_t status = ccs811_get_status(dev);
+    // Step 3: Read hardware version
+    uint8_t hw_version = 0;
+    if (ccs811_read_reg(dev, CCS811_REG_HW_VERSION, &hw_version, 1) != 0) {
+        return CCS811_ERR_I2C;
+    }
+    dev->hw_version = hw_version;
+
+    // Step 4: Read firmware bootloader version (2 bytes)
+    uint8_t fw_boot[2] = {0};
+    if (ccs811_read_reg(dev, CCS811_REG_FW_BOOT_VERSION, fw_boot, 2) != 0) {
+        return CCS811_ERR_I2C;
+    }
+    dev->fw_boot_version = ((uint16_t)fw_boot[0] << 8) | fw_boot[1];
+
+    // Step 5: Read firmware application version (2 bytes)
+    uint8_t fw_app[2] = {0};
+    if (ccs811_read_reg(dev, CCS811_REG_FW_APP_VERSION, fw_app, 2) != 0) {
+        return CCS811_ERR_I2C;
+    }
+    dev->fw_app_version = ((uint16_t)fw_app[0] << 8) | fw_app[1];
+
+    // Step 6: Check STATUS register for APP_VALID bit
+    uint8_t status = 0;
+    if (ccs811_read_reg(dev, CCS811_REG_STATUS, &status, 1) != 0) {
+        return CCS811_ERR_I2C;
+    }
+    dev->last_status = status;
+
     if (!(status & CCS811_STATUS_APP_VALID)) {
         return CCS811_ERR_APP_INVALID;
     }
 
-    // Step 3: Start application mode (write to APP_START with no data)
+    // Step 7: Write APP_START command to register 0xF4 (no data, just address)
+    // This transitions the sensor from boot mode to application mode
     if (ccs811_write_reg_no_data(dev, CCS811_REG_APP_START) != 0) {
         return CCS811_ERR_APP_START;
     }
 
-    // Wait for app to start
+    // Step 8: Wait 1ms for app mode transition
     sleep_ms(1);
 
-    // Step 4: Verify we're in application mode
-    status = ccs811_get_status(dev);
+    // Step 9: Verify STATUS FW_MODE bit is set (now in application mode)
+    if (ccs811_read_reg(dev, CCS811_REG_STATUS, &status, 1) != 0) {
+        return CCS811_ERR_I2C;
+    }
+    dev->last_status = status;
+
     if (!(status & CCS811_STATUS_FW_MODE)) {
         return CCS811_ERR_APP_START;
     }
 
-    // Step 5: Set measurement mode to 1 second interval
-    ccs811_error_t err = ccs811_set_mode(dev, CCS811_MODE_1SEC);
+    // Step 10: Set the requested measurement mode
+    ccs811_error_t err = ccs811_set_mode(dev, mode);
     if (err != CCS811_OK) {
         return err;
     }
+    dev->mode = mode;
 
+    // Initialization complete
     dev->initialized = true;
     dev->init_time_ms = to_ms_since_boot(get_absolute_time());
 
     return CCS811_OK;
+}
+
+ccs811_error_t ccs811_init(ccs811_t *dev, i2c_inst_t *i2c, uint8_t addr) {
+    // Default to Mode 1 (1 second measurement interval)
+    return ccs811_init_with_mode(dev, i2c, addr, CCS811_MODE_1SEC);
 }
 
 ccs811_error_t ccs811_set_mode(ccs811_t *dev, ccs811_mode_t mode) {
@@ -232,11 +277,31 @@ uint8_t ccs811_get_error_id(ccs811_t *dev) {
 }
 
 uint8_t ccs811_get_hw_id(ccs811_t *dev) {
+    if (dev && dev->initialized) {
+        return dev->hw_id;  // Return cached value
+    }
+    // Fallback: read from device
     uint8_t hw_id = 0;
     if (dev) {
         ccs811_read_reg(dev, CCS811_REG_HW_ID, &hw_id, 1);
     }
     return hw_id;
+}
+
+uint8_t ccs811_get_hw_version(ccs811_t *dev) {
+    return dev ? dev->hw_version : 0;
+}
+
+uint16_t ccs811_get_fw_boot_version(ccs811_t *dev) {
+    return dev ? dev->fw_boot_version : 0;
+}
+
+uint16_t ccs811_get_fw_app_version(ccs811_t *dev) {
+    return dev ? dev->fw_app_version : 0;
+}
+
+ccs811_mode_t ccs811_get_mode(ccs811_t *dev) {
+    return dev ? dev->mode : CCS811_MODE_IDLE;
 }
 
 bool ccs811_is_warmed_up(ccs811_t *dev) {
