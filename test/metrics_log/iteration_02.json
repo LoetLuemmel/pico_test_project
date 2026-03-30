@@ -1,0 +1,14 @@
+{
+  "iteration": 2,
+  "timestamp": "2026-03-30T17:20:16.058562",
+  "metrics": {
+    "reads": 59,
+    "fails": 0,
+    "fail_rate": 0.0,
+    "eco2_mean": 408.5593220338983,
+    "eco2_stddev": 2.328764556588617,
+    "tvoc_mean": 0.7796610169491526,
+    "tvoc_stddev": 0.5892074340592387,
+    "first_valid_ms": 25148
+  }
+}
