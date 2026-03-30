@@ -30,9 +30,9 @@ target_link_libraries(pico_test
     hardware_i2c
 )
 
-# Enable USB output, disable UART output (can be changed)
-pico_enable_stdio_usb(pico_test 1)
-pico_enable_stdio_uart(pico_test 0)
+# Enable UART output (debug probe), disable USB output
+pico_enable_stdio_usb(pico_test 0)
+pico_enable_stdio_uart(pico_test 1)
 
 # Create map/bin/hex/uf2 files
 pico_add_extra_outputs(pico_test)

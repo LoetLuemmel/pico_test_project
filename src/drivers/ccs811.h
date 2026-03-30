@@ -66,7 +66,10 @@ typedef enum {
     CCS811_ERR_HW_ID        = -2,
     CCS811_ERR_APP_INVALID  = -3,
     CCS811_ERR_APP_START    = -4,
-    CCS811_ERR_SENSOR       = -5
+    CCS811_ERR_SENSOR       = -5,
+    CCS811_ERR_I2C_TIMEOUT  = -6,
+    CCS811_ERR_NOT_READY    = -7,
+    CCS811_ERR_HW_ERROR     = -8
 } ccs811_error_t;
 
 // Sensor data structure
@@ -79,12 +82,23 @@ typedef struct {
     bool     error;         // Error flag
 } ccs811_data_t;
 
+// I2C retry configuration
+#define CCS811_I2C_MAX_RETRIES      3
+#define CCS811_I2C_RETRY_DELAY_1_MS 10
+#define CCS811_I2C_RETRY_DELAY_2_MS 50
+#define CCS811_I2C_RETRY_DELAY_3_MS 200
+
 // Device handle
 typedef struct {
     i2c_inst_t *i2c;
     uint8_t addr;
     bool initialized;
     uint32_t init_time_ms;  // Time when sensor was initialized (for warm-up tracking)
+    // I2C statistics (iteration 2)
+    uint32_t i2c_retries;       // Total retry attempts
+    uint32_t i2c_failures;      // Total I2C failures after all retries
+    uint8_t last_error_id;      // Last ERROR_ID register value
+    uint8_t last_status;        // Last STATUS register value
 } ccs811_t;
 
 /**
@@ -188,5 +202,37 @@ ccs811_error_t ccs811_reset(ccs811_t *dev);
  * @return String description of error
  */
 const char* ccs811_error_string(ccs811_error_t error);
+
+/**
+ * @brief Check for hardware errors via ERROR_ID register
+ *
+ * @param dev Pointer to device handle
+ * @return CCS811_OK if no errors, CCS811_ERR_HW_ERROR if error detected
+ */
+ccs811_error_t ccs811_check_error(ccs811_t *dev);
+
+/**
+ * @brief Read data with pre-validation (status check, data ready, error check)
+ *
+ * This is the robust read function for iteration 2+ that:
+ * - Checks STATUS register before reading
+ * - Validates DATA_READY flag
+ * - Checks ERROR_ID register for hardware errors
+ * - Uses I2C retry with exponential backoff
+ *
+ * @param dev Pointer to device handle
+ * @param data Pointer to data structure to fill
+ * @return CCS811_OK on success, error code on failure
+ */
+ccs811_error_t ccs811_read_data_robust(ccs811_t *dev, ccs811_data_t *data);
+
+/**
+ * @brief Get I2C retry statistics
+ *
+ * @param dev Pointer to device handle
+ * @param retries Pointer to store total retry count
+ * @param failures Pointer to store total failure count
+ */
+void ccs811_get_i2c_stats(ccs811_t *dev, uint32_t *retries, uint32_t *failures);
 
 #endif // CCS811_H

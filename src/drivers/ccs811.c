@@ -13,10 +13,17 @@
 // I2C timeout in microseconds
 #define CCS811_I2C_TIMEOUT_US   10000
 
+// Retry delays in milliseconds (exponential backoff)
+static const uint32_t retry_delays_ms[CCS811_I2C_MAX_RETRIES] = {
+    CCS811_I2C_RETRY_DELAY_1_MS,
+    CCS811_I2C_RETRY_DELAY_2_MS,
+    CCS811_I2C_RETRY_DELAY_3_MS
+};
+
 /**
- * @brief Write data to a register
+ * @brief Write data to a register (single attempt)
  */
-static int ccs811_write_reg(ccs811_t *dev, uint8_t reg, const uint8_t *data, size_t len) {
+static int ccs811_write_reg_once(ccs811_t *dev, uint8_t reg, const uint8_t *data, size_t len) {
     uint8_t buf[len + 1];
     buf[0] = reg;
     if (data && len > 0) {
@@ -28,17 +35,52 @@ static int ccs811_write_reg(ccs811_t *dev, uint8_t reg, const uint8_t *data, siz
 }
 
 /**
- * @brief Write to a register with no data (mailbox trigger)
+ * @brief Write data to a register with retry and exponential backoff
  */
-static int ccs811_write_reg_no_data(ccs811_t *dev, uint8_t reg) {
+static int ccs811_write_reg(ccs811_t *dev, uint8_t reg, const uint8_t *data, size_t len) {
+    for (int attempt = 0; attempt < CCS811_I2C_MAX_RETRIES; attempt++) {
+        if (ccs811_write_reg_once(dev, reg, data, len) == 0) {
+            return 0;
+        }
+        // Retry with exponential backoff
+        if (attempt < CCS811_I2C_MAX_RETRIES - 1) {
+            dev->i2c_retries++;
+            sleep_ms(retry_delays_ms[attempt]);
+        }
+    }
+    dev->i2c_failures++;
+    return -1;
+}
+
+/**
+ * @brief Write to a register with no data (mailbox trigger) - single attempt
+ */
+static int ccs811_write_reg_no_data_once(ccs811_t *dev, uint8_t reg) {
     int ret = i2c_write_timeout_us(dev->i2c, dev->addr, &reg, 1, false, CCS811_I2C_TIMEOUT_US);
     return (ret == 1) ? 0 : -1;
 }
 
 /**
- * @brief Read data from a register
+ * @brief Write to a register with no data with retry
  */
-static int ccs811_read_reg(ccs811_t *dev, uint8_t reg, uint8_t *data, size_t len) {
+static int ccs811_write_reg_no_data(ccs811_t *dev, uint8_t reg) {
+    for (int attempt = 0; attempt < CCS811_I2C_MAX_RETRIES; attempt++) {
+        if (ccs811_write_reg_no_data_once(dev, reg) == 0) {
+            return 0;
+        }
+        if (attempt < CCS811_I2C_MAX_RETRIES - 1) {
+            dev->i2c_retries++;
+            sleep_ms(retry_delays_ms[attempt]);
+        }
+    }
+    dev->i2c_failures++;
+    return -1;
+}
+
+/**
+ * @brief Read data from a register (single attempt)
+ */
+static int ccs811_read_reg_once(ccs811_t *dev, uint8_t reg, uint8_t *data, size_t len) {
     int ret = i2c_write_timeout_us(dev->i2c, dev->addr, &reg, 1, true, CCS811_I2C_TIMEOUT_US);
     if (ret != 1) {
         return -1;
@@ -46,6 +88,23 @@ static int ccs811_read_reg(ccs811_t *dev, uint8_t reg, uint8_t *data, size_t len
 
     ret = i2c_read_timeout_us(dev->i2c, dev->addr, data, len, false, CCS811_I2C_TIMEOUT_US);
     return (ret == (int)len) ? 0 : -1;
+}
+
+/**
+ * @brief Read data from a register with retry and exponential backoff
+ */
+static int ccs811_read_reg(ccs811_t *dev, uint8_t reg, uint8_t *data, size_t len) {
+    for (int attempt = 0; attempt < CCS811_I2C_MAX_RETRIES; attempt++) {
+        if (ccs811_read_reg_once(dev, reg, data, len) == 0) {
+            return 0;
+        }
+        if (attempt < CCS811_I2C_MAX_RETRIES - 1) {
+            dev->i2c_retries++;
+            sleep_ms(retry_delays_ms[attempt]);
+        }
+    }
+    dev->i2c_failures++;
+    return -1;
 }
 
 ccs811_error_t ccs811_init(ccs811_t *dev, i2c_inst_t *i2c, uint8_t addr) {
@@ -57,6 +116,10 @@ ccs811_error_t ccs811_init(ccs811_t *dev, i2c_inst_t *i2c, uint8_t addr) {
     dev->addr = addr;
     dev->initialized = false;
     dev->init_time_ms = 0;
+    dev->i2c_retries = 0;
+    dev->i2c_failures = 0;
+    dev->last_error_id = 0;
+    dev->last_status = 0;
 
     // Wait for sensor to be ready after power-on
     sleep_ms(20);
@@ -244,11 +307,101 @@ ccs811_error_t ccs811_reset(ccs811_t *dev) {
 const char* ccs811_error_string(ccs811_error_t error) {
     switch (error) {
         case CCS811_OK:             return "OK";
-        case CCS811_ERR_I2C:        return "I2C communication error";
-        case CCS811_ERR_HW_ID:      return "Invalid hardware ID (not 0x81)";
-        case CCS811_ERR_APP_INVALID: return "No valid application firmware";
-        case CCS811_ERR_APP_START:  return "Failed to start application mode";
-        case CCS811_ERR_SENSOR:     return "Sensor error";
-        default:                    return "Unknown error";
+        case CCS811_ERR_I2C:        return "I2C_ERROR";
+        case CCS811_ERR_HW_ID:      return "HW_ID_INVALID";
+        case CCS811_ERR_APP_INVALID: return "APP_INVALID";
+        case CCS811_ERR_APP_START:  return "APP_START_FAIL";
+        case CCS811_ERR_SENSOR:     return "SENSOR_ERROR";
+        case CCS811_ERR_I2C_TIMEOUT: return "I2C_TIMEOUT";
+        case CCS811_ERR_NOT_READY:  return "NOT_READY";
+        case CCS811_ERR_HW_ERROR:   return "HW_ERROR";
+        default:                    return "UNKNOWN";
+    }
+}
+
+ccs811_error_t ccs811_check_error(ccs811_t *dev) {
+    if (!dev) {
+        return CCS811_ERR_I2C;
+    }
+
+    // Read STATUS register first
+    uint8_t status = 0;
+    if (ccs811_read_reg(dev, CCS811_REG_STATUS, &status, 1) != 0) {
+        return CCS811_ERR_I2C_TIMEOUT;
+    }
+    dev->last_status = status;
+
+    // Check if error bit is set
+    if (status & CCS811_STATUS_ERROR) {
+        // Read ERROR_ID register for details
+        uint8_t error_id = 0;
+        if (ccs811_read_reg(dev, CCS811_REG_ERROR_ID, &error_id, 1) != 0) {
+            return CCS811_ERR_I2C_TIMEOUT;
+        }
+        dev->last_error_id = error_id;
+        return CCS811_ERR_HW_ERROR;
+    }
+
+    return CCS811_OK;
+}
+
+ccs811_error_t ccs811_read_data_robust(ccs811_t *dev, ccs811_data_t *data) {
+    if (!dev || !data) {
+        return CCS811_ERR_I2C;
+    }
+
+    // Step 1: Read and check STATUS register
+    uint8_t status = 0;
+    if (ccs811_read_reg(dev, CCS811_REG_STATUS, &status, 1) != 0) {
+        return CCS811_ERR_I2C_TIMEOUT;
+    }
+    dev->last_status = status;
+
+    // Step 2: Check for hardware errors (ERROR bit in STATUS)
+    if (status & CCS811_STATUS_ERROR) {
+        // Read ERROR_ID register (0xE0) for details
+        uint8_t error_id = 0;
+        ccs811_read_reg(dev, CCS811_REG_ERROR_ID, &error_id, 1);
+        dev->last_error_id = error_id;
+        data->error = true;
+        data->error_id = error_id;
+        data->status = status;
+        return CCS811_ERR_HW_ERROR;
+    }
+
+    // Step 3: Validate DATA_READY flag
+    if (!(status & CCS811_STATUS_DATA_READY)) {
+        data->data_ready = false;
+        data->status = status;
+        return CCS811_ERR_NOT_READY;
+    }
+
+    // Step 4: Read ALG_RESULT_DATA (8 bytes)
+    uint8_t buf[8];
+    if (ccs811_read_reg(dev, CCS811_REG_ALG_RESULT_DATA, buf, 8) != 0) {
+        return CCS811_ERR_I2C_TIMEOUT;
+    }
+
+    // Parse data (MSB first)
+    data->eco2 = ((uint16_t)buf[0] << 8) | buf[1];
+    data->tvoc = ((uint16_t)buf[2] << 8) | buf[3];
+    data->status = buf[4];
+    data->error_id = buf[5];
+    data->data_ready = true;
+    data->error = (data->status & CCS811_STATUS_ERROR) != 0;
+
+    // Step 5: Final error check from result data
+    if (data->error) {
+        dev->last_error_id = data->error_id;
+        return CCS811_ERR_SENSOR;
+    }
+
+    return CCS811_OK;
+}
+
+void ccs811_get_i2c_stats(ccs811_t *dev, uint32_t *retries, uint32_t *failures) {
+    if (dev) {
+        if (retries) *retries = dev->i2c_retries;
+        if (failures) *failures = dev->i2c_failures;
     }
 }
