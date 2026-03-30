@@ -5,10 +5,15 @@
 
 #include "ccs811.h"
 #include "pico/stdlib.h"
+#include "hardware/gpio.h"
 #include <string.h>
 
 // I2C timeout in microseconds
 #define CCS811_I2C_TIMEOUT_US   10000
+
+// WAKE pin timing (iteration 6)
+#define CCS811_WAKE_ASSERT_US   50    // Time to assert WAKE before I2C (50µs minimum)
+#define CCS811_WAKE_RELEASE_US  20    // Time after I2C before releasing WAKE
 
 // Retry delays in milliseconds (exponential backoff)
 static const uint32_t retry_delays_ms[CCS811_I2C_MAX_RETRIES] = {
@@ -16,6 +21,26 @@ static const uint32_t retry_delays_ms[CCS811_I2C_MAX_RETRIES] = {
     CCS811_I2C_RETRY_DELAY_2_MS,
     CCS811_I2C_RETRY_DELAY_3_MS
 };
+
+/**
+ * @brief Assert WAKE pin (LOW = active)
+ */
+static inline void ccs811_wake_assert(ccs811_t *dev) {
+    if (dev->use_wake_pin && dev->wake_pin >= 0) {
+        gpio_put(dev->wake_pin, 0);  // WAKE is active LOW
+        sleep_us(CCS811_WAKE_ASSERT_US);
+    }
+}
+
+/**
+ * @brief Release WAKE pin (HIGH = sleep)
+ */
+static inline void ccs811_wake_release(ccs811_t *dev) {
+    if (dev->use_wake_pin && dev->wake_pin >= 0) {
+        sleep_us(CCS811_WAKE_RELEASE_US);
+        gpio_put(dev->wake_pin, 1);  // WAKE released = sensor can sleep
+    }
+}
 
 /**
  * @brief Write data to a register (single attempt)
@@ -27,7 +52,10 @@ static int ccs811_write_reg_once(ccs811_t *dev, uint8_t reg, const uint8_t *data
         memcpy(&buf[1], data, len);
     }
 
+    ccs811_wake_assert(dev);
     int ret = i2c_write_timeout_us(dev->i2c, dev->addr, buf, len + 1, false, CCS811_I2C_TIMEOUT_US);
+    ccs811_wake_release(dev);
+
     return (ret == (int)(len + 1)) ? 0 : -1;
 }
 
@@ -53,7 +81,10 @@ static int ccs811_write_reg(ccs811_t *dev, uint8_t reg, const uint8_t *data, siz
  * @brief Write to a register with no data (mailbox trigger) - single attempt
  */
 static int ccs811_write_reg_no_data_once(ccs811_t *dev, uint8_t reg) {
+    ccs811_wake_assert(dev);
     int ret = i2c_write_timeout_us(dev->i2c, dev->addr, &reg, 1, false, CCS811_I2C_TIMEOUT_US);
+    ccs811_wake_release(dev);
+
     return (ret == 1) ? 0 : -1;
 }
 
@@ -78,12 +109,17 @@ static int ccs811_write_reg_no_data(ccs811_t *dev, uint8_t reg) {
  * @brief Read data from a register (single attempt)
  */
 static int ccs811_read_reg_once(ccs811_t *dev, uint8_t reg, uint8_t *data, size_t len) {
+    ccs811_wake_assert(dev);
+
     int ret = i2c_write_timeout_us(dev->i2c, dev->addr, &reg, 1, true, CCS811_I2C_TIMEOUT_US);
     if (ret != 1) {
+        ccs811_wake_release(dev);
         return -1;
     }
 
     ret = i2c_read_timeout_us(dev->i2c, dev->addr, data, len, false, CCS811_I2C_TIMEOUT_US);
+    ccs811_wake_release(dev);
+
     return (ret == (int)len) ? 0 : -1;
 }
 
@@ -123,6 +159,8 @@ ccs811_error_t ccs811_init_with_mode(ccs811_t *dev, i2c_inst_t *i2c, uint8_t add
     dev->fw_boot_version = 0;
     dev->fw_app_version = 0;
     dev->mode = CCS811_MODE_IDLE;
+    dev->wake_pin = -1;         // WAKE pin not used by default
+    dev->use_wake_pin = false;
 
     // Step 1: Wait 20ms for sensor power-on stabilization
     sleep_ms(20);
@@ -501,4 +539,30 @@ ccs811_error_t ccs811_write_baseline(ccs811_t *dev, uint16_t baseline) {
     }
 
     return CCS811_OK;
+}
+
+ccs811_error_t ccs811_enable_wake_pin(ccs811_t *dev, int wake_pin) {
+    if (!dev) {
+        return CCS811_ERR_I2C;
+    }
+
+    dev->wake_pin = wake_pin;
+    dev->use_wake_pin = true;
+
+    // Configure GPIO as output, initially HIGH (sensor in sleep mode)
+    gpio_init(wake_pin);
+    gpio_set_dir(wake_pin, GPIO_OUT);
+    gpio_put(wake_pin, 1);  // WAKE = HIGH (inactive, sensor can sleep)
+
+    return CCS811_OK;
+}
+
+void ccs811_disable_wake_pin(ccs811_t *dev) {
+    if (dev) {
+        if (dev->use_wake_pin && dev->wake_pin >= 0) {
+            gpio_put(dev->wake_pin, 0);  // Assert WAKE LOW before disabling
+        }
+        dev->use_wake_pin = false;
+        dev->wake_pin = -1;
+    }
 }
