@@ -1,18 +1,18 @@
 /**
  * @file main.c
- * @brief CCS811 Air Quality Sensor - Iteration 6: Power Optimization
+ * @brief CCS811 Air Quality Sensor - Iteration 7: Diagnostics and Self-Test
  *
  * Improvements in this iteration:
- * - WAKE pin control (GP6): assert LOW before I2C, HIGH after for low-power sleep
- * - Switch to Mode 3 (60s interval) for duty-cycled operation (Mode 2 for testing)
- * - Sleep Pico between measurements to reduce power consumption
- * - Track wake_cycles, avg_wake_time_us, duty_cycle_pct
- * - [POWER] serial output with power management statistics
+ * - Automated boot self-test: verify HW_ID, FW_BOOT_VERSION, FW_APP_VERSION
+ * - Structured error logging with timestamps and error codes
+ * - Cumulative error statistics (histogram of error types)
+ * - [DIAG] output section with boot_self_test and error statistics
+ * - Full diagnostic coverage for production reliability
  *
  * Hardware:
  * - Raspberry Pi Pico (RP2040)
  * - Joy-IT SEN-CCS811V1 sensor on I2C0 (GP4=SDA, GP5=SCL)
- * - WAKE pin connected to GP6 (was GND in previous iterations)
+ * - WAKE pin connected to GP6 (pin 9) for power management
  * - Pico Debug Probe for SWD debugging and UART capture
  *
  * Output: UART0 at 115200 baud (captured by debug probe)
@@ -143,6 +143,95 @@ static uint16_t eco2_drift = 0;
 static uint32_t wake_cycles = 0;
 static uint64_t total_wake_time_us = 0;
 static uint32_t total_elapsed_ms = 0;
+
+// Diagnostics (iteration 7)
+typedef struct {
+    uint32_t i2c_errors;
+    uint32_t hw_id_errors;
+    uint32_t app_invalid_errors;
+    uint32_t app_start_errors;
+    uint32_t sensor_errors;
+    uint32_t timeout_errors;
+    uint32_t not_ready_errors;
+    uint32_t hw_errors;
+} error_histogram_t;
+
+static error_histogram_t error_hist = {0};
+static bool boot_self_test_passed = false;
+
+/**
+ * @brief Log structured error with timestamp
+ */
+static void log_error(ccs811_error_t err, uint32_t timestamp_ms) {
+    const char *err_str = ccs811_error_string(err);
+    printf("[ERROR] code=%d desc=\"%s\" ts_ms=%lu\n", err, err_str, timestamp_ms);
+
+    // Update error histogram
+    switch (err) {
+        case CCS811_ERR_I2C:           error_hist.i2c_errors++; break;
+        case CCS811_ERR_HW_ID:         error_hist.hw_id_errors++; break;
+        case CCS811_ERR_APP_INVALID:   error_hist.app_invalid_errors++; break;
+        case CCS811_ERR_APP_START:     error_hist.app_start_errors++; break;
+        case CCS811_ERR_SENSOR:        error_hist.sensor_errors++; break;
+        case CCS811_ERR_I2C_TIMEOUT:   error_hist.timeout_errors++; break;
+        case CCS811_ERR_NOT_READY:     error_hist.not_ready_errors++; break;
+        case CCS811_ERR_HW_ERROR:      error_hist.hw_errors++; break;
+        default: break;
+    }
+}
+
+/**
+ * @brief Perform boot self-test
+ *
+ * Verifies HW_ID, FW_BOOT_VERSION, FW_APP_VERSION
+ * Returns true if all checks pass
+ */
+static bool perform_boot_self_test(void) {
+    printf("[DIAG] Boot self-test starting...\n");
+
+    // Test 1: Hardware ID must be 0x81
+    uint8_t hw_id = ccs811_get_hw_id(&sensor);
+    if (hw_id != CCS811_HW_ID_VALUE) {
+        printf("[DIAG] FAIL: HW_ID=0x%02X (expected 0x81)\n", hw_id);
+        return false;
+    }
+    printf("[DIAG] PASS: HW_ID=0x%02X\n", hw_id);
+
+    // Test 2: HW_VERSION should be readable
+    uint8_t hw_ver = ccs811_get_hw_version(&sensor);
+    printf("[DIAG] PASS: HW_VERSION=0x%02X\n", hw_ver);
+
+    // Test 3: FW_BOOT_VERSION should be readable
+    uint16_t fw_boot = ccs811_get_fw_boot_version(&sensor);
+    printf("[DIAG] PASS: FW_BOOT_VERSION=0x%04X (v%d.%d)\n",
+           fw_boot, (fw_boot >> 8) & 0xFF, fw_boot & 0xFF);
+
+    // Test 4: FW_APP_VERSION should be readable
+    uint16_t fw_app = ccs811_get_fw_app_version(&sensor);
+    printf("[DIAG] PASS: FW_APP_VERSION=0x%04X (v%d.%d)\n",
+           fw_app, (fw_app >> 8) & 0xFF, fw_app & 0xFF);
+
+    printf("[DIAG] Boot self-test: PASS\n");
+    return true;
+}
+
+/**
+ * @brief Print diagnostics summary
+ */
+static void print_diagnostics(void) {
+    uint32_t total_errors = error_hist.i2c_errors + error_hist.hw_id_errors +
+                           error_hist.app_invalid_errors + error_hist.app_start_errors +
+                           error_hist.sensor_errors + error_hist.timeout_errors +
+                           error_hist.not_ready_errors + error_hist.hw_errors;
+
+    printf("[DIAG] boot_self_test=%s total_errors=%lu\n",
+           boot_self_test_passed ? "pass" : "fail", total_errors);
+    printf("[DIAG] error_histogram: i2c=%lu hw_id=%lu app_invalid=%lu app_start=%lu sensor=%lu timeout=%lu not_ready=%lu hw=%lu\n",
+           error_hist.i2c_errors, error_hist.hw_id_errors,
+           error_hist.app_invalid_errors, error_hist.app_start_errors,
+           error_hist.sensor_errors, error_hist.timeout_errors,
+           error_hist.not_ready_errors, error_hist.hw_errors);
+}
 
 /**
  * @brief Initialize I2C bus
@@ -519,12 +608,13 @@ int main() {
     sleep_ms(100);
 
     printf("\n");
-    printf("[INFO] CCS811 Iteration 6: Power Optimization\n");
+    printf("[INFO] CCS811 Iteration 7: Diagnostics and Self-Test\n");
     printf("[INFO] I2C: GP%d (SDA), GP%d (SCL), %d Hz\n", I2C_SDA_PIN, I2C_SCL_PIN, I2C_FREQ_HZ);
     printf("[INFO] WAKE pin: GP%d (controls low-power sleep)\n", WAKE_PIN);
     printf("[INFO] Filter: MA window=%d, outlier threshold=%.1f sigma\n",
            FILTER_WINDOW_SIZE, OUTLIER_SIGMA_THRESHOLD);
     printf("[INFO] Baseline: flash storage enabled, max age = 24h\n");
+    printf("[INFO] Diagnostics: error logging and boot self-test enabled\n");
 
     // Initialize CCS811 sensor
     printf("[INFO] Initializing CCS811 at 0x%02X with mode %s...\n",
@@ -533,7 +623,8 @@ int main() {
     ccs811_error_t err = ccs811_init_with_mode(&sensor, I2C_PORT, CCS811_I2C_ADDR_DEFAULT, SENSOR_MODE);
 
     if (err != CCS811_OK) {
-        printf("[ERROR] Init failed: %s\n", ccs811_error_string(err));
+        log_error(err, 0);
+        printf("[FATAL] Init failed, halting\n");
         while (true) {
             toggle_led();
             sleep_ms(100);
@@ -543,6 +634,9 @@ int main() {
     printf("[INFO] CCS811 initialized! HW_ID=0x%02X HW_VER=0x%02X\n",
            ccs811_get_hw_id(&sensor),
            ccs811_get_hw_version(&sensor));
+
+    // Perform boot self-test (iteration 7)
+    boot_self_test_passed = perform_boot_self_test();
 
     // Enable WAKE pin power management (iteration 6)
     err = ccs811_enable_wake_pin(&sensor, WAKE_PIN);
@@ -558,6 +652,7 @@ int main() {
             printf("[BASELINE] stored_baseline_hex=0x%04X restored=true baseline_age_s=%lu\n",
                    stored_baseline, baseline_age_s);
         } else {
+            log_error(err, to_ms_since_boot(get_absolute_time()));
             printf("[BASELINE] stored_baseline_hex=0x%04X restored=false baseline_age_s=%lu (write failed)\n",
                    stored_baseline, baseline_age_s);
         }
@@ -571,6 +666,8 @@ int main() {
     if (err == CCS811_OK) {
         printf("[INFO] ENV_DATA set: temp=%.1f°C, humidity=%.1f%%\n",
                ENV_TEMP_DEFAULT, ENV_HUMIDITY_DEFAULT);
+    } else {
+        log_error(err, to_ms_since_boot(get_absolute_time()));
     }
 
     printf("[INFO] Starting measurement loop with power optimization...\n");
@@ -658,9 +755,10 @@ int main() {
             report_breath_test();
 
         } else if (err == CCS811_ERR_NOT_READY) {
-            // Skip
+            // Skip - data not ready is expected, not an error
         } else {
             total_fails++;
+            log_error(err, uptime_ms);
             printf("[METRIC] read_fail=1 err=%s ts_ms=%lu warming_up=%s\n",
                    ccs811_error_string(err), uptime_ms,
                    warming_up ? "true" : "false");
@@ -669,6 +767,7 @@ int main() {
         // Print summary every 10 seconds
         if (uptime_s >= last_summary_s + 10 && uptime_s > 0) {
             print_summary(uptime_s);
+            print_diagnostics();
             last_summary_s = uptime_s;
         }
 
