@@ -1,0 +1,147 @@
+# Wiring Diagram
+## Pico to CCS811 Sensor Connections
+
+### Overview
+
+```
+                    ┌─────────────────────────────────┐
+                    │      Raspberry Pi Pico          │
+                    │           (Top View)            │
+                    │                                 │
+              ┌─────┤ GP0  (1)           (40) VBUS    │
+              │     │ GP1  (2)           (39) VSYS    │
+              │     │ GND  (3)           (38) GND ────┼──────┐
+              │     │ GP2  (4)           (37) 3V3_EN  │      │
+              │     │ GP3  (5)           (36) 3V3 ────┼───┐  │
+     I2C SDA ◄┼─────┤ GP4  (6)           (35) ADC_VREF│   │  │
+     I2C SCL ◄┼─────┤ GP5  (7)           (34) GP28    │   │  │
+              │     │ GND  (8)           (33) GND     │   │  │
+              │     │ GP6  (9)           (32) GP27    │   │  │
+              │     │ GP7  (10)          (31) GP26    │   │  │
+              │     │ GP8  (11)          (30) RUN     │   │  │
+              │     │ GP9  (12)          (29) GP22    │   │  │
+              │     │ GND  (13)          (28) GND     │   │  │
+              │     │ GP10 (14)          (27) GP21    │   │  │
+              │     │ GP11 (15)          (26) GP20    │   │  │
+              │     │ GP12 (16)          (25) GP19    │   │  │
+              │     │ GP13 (17)          (24) GP18    │   │  │
+              │     │ GND  (18)          (23) GND     │   │  │
+              │     │ GP14 (19)          (22) GP17    │   │  │
+              │     │ GP15 (20)          (21) GP16    │   │  │
+              │     └─────────────────────────────────┘   │  │
+              │                                           │  │
+              │     ┌─────────────────────────────────┐   │  │
+              │     │       CCS811 Sensor Module      │   │  │
+              │     │          (Joy-IT)               │   │  │
+              │     │                                 │   │  │
+              │     │  ┌───┐ ┌───┐ ┌───┐ ┌───┐ ┌───┐ │   │  │
+              │     │  │VIN│ │GND│ │SCL│ │SDA│ │WAK│ │   │  │
+              │     │  └─┬─┘ └─┬─┘ └─┬─┘ └─┬─┘ └─┬─┘ │   │  │
+              │     └────┼─────┼─────┼─────┼─────┼───┘   │  │
+              │          │     │     │     │     │       │  │
+              │          │     │     │     │     │       │  │
+              └──────────┼─────┼─────┼─────┼─────┼───────┘  │
+                         │     │     │     │     │          │
+                         │     │     │     │     └──────────┤
+                         │     └─────┼─────┼────────────────┘
+                         │           │     │
+                         └───────────┘     └── (to GP4)
+                              │
+                              └── (to GP5)
+```
+
+### Connection Table
+
+| CCS811 Pin | Wire Color | Pico Pin | Pico GPIO | Function |
+|------------|------------|----------|-----------|----------|
+| VIN | Red | Pin 36 | 3V3(OUT) | 3.3V Power |
+| GND | Black | Pin 38 | GND | Ground |
+| SCL | Yellow | Pin 7 | GP5 | I2C Clock |
+| SDA | Blue | Pin 6 | GP4 | I2C Data |
+| WAKE | Black | Pin 38 | GND | Wake (tie low) |
+| RST | - | NC | - | Not connected |
+| INT | - | NC | - | Not connected |
+
+### Detailed Wiring
+
+```
+    CCS811 Module                    Raspberry Pi Pico
+    ┌───────────┐                    ┌───────────────┐
+    │           │                    │               │
+    │  VIN  ●───┼────── RED ────────►│● 3V3 (Pin 36) │
+    │           │                    │               │
+    │  GND  ●───┼────── BLACK ──────►│● GND (Pin 38) │
+    │           │                    │               │
+    │  SCL  ●───┼────── YELLOW ─────►│● GP5 (Pin 7)  │
+    │           │                    │               │
+    │  SDA  ●───┼────── BLUE ───────►│● GP4 (Pin 6)  │
+    │           │                    │               │
+    │  WAKE ●───┼────── BLACK ──────►│● GND (Pin 38) │
+    │           │                    │               │
+    │  RST  ●   │   (not connected)  │               │
+    │           │                    │               │
+    │  INT  ●   │   (not connected)  │               │
+    │           │                    │               │
+    └───────────┘                    └───────────────┘
+```
+
+### Debug Probe Connections
+
+```
+    Debug Probe                      Raspberry Pi Pico
+    ┌───────────┐                    ┌───────────────┐
+    │           │                    │               │
+    │  SWCLK ●──┼────── ORANGE ─────►│● SWCLK        │
+    │           │                    │  (Debug Port) │
+    │  SWDIO ●──┼────── YELLOW ─────►│● SWDIO        │
+    │           │                    │  (Debug Port) │
+    │  GND   ●──┼────── BLACK ──────►│● GND          │
+    │           │                    │               │
+    └───────────┘                    └───────────────┘
+```
+
+### I2C Pull-up Resistors
+
+The Joy-IT CCS811 module includes onboard 10kΩ pull-up resistors on SDA and SCL lines.
+No external pull-ups are required.
+
+```
+    3.3V
+     │
+     ├──┬── 10kΩ (on module)
+     │  │
+     │  └──► SDA
+     │
+     └──┬── 10kΩ (on module)
+        │
+        └──► SCL
+```
+
+### Important Notes
+
+1. **Power**: Use 3.3V from Pico, not 5V USB VBUS
+2. **WAKE Pin**: Must be tied to GND for sensor to respond to I2C
+3. **RST Pin**: Has internal pull-up, leave floating
+4. **INT Pin**: Optional interrupt output, not used in basic configuration
+5. **I2C Address**: Default 0x5A (ADDR pin on module is tied low)
+
+### Physical Layout Suggestion
+
+```
+    ┌──────────────────────────────────────┐
+    │            Breadboard                │
+    │                                      │
+    │   ┌─────────┐      ┌──────────────┐  │
+    │   │ CCS811  │      │    Pico      │  │
+    │   │ Module  │      │              │  │
+    │   │         │      │              │  │
+    │   │  ● ● ●  │      │  ●●●●●●●●●●  │  │
+    │   │  ● ● ●  │      │  ●●●●●●●●●●  │  │
+    │   └─────────┘      │  ●●●●●●●●●●  │  │
+    │                    │  ●●●●●●●●●●  │  │
+    │   Jumper wires     └──────────────┘  │
+    │   connecting                         │
+    │   modules                            │
+    │                                      │
+    └──────────────────────────────────────┘
+```

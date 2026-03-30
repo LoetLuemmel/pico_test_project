@@ -1,137 +1,191 @@
 /**
- * Pico Test Project - Basic I/O Testing with Debug Probe Support
+ * @file main.c
+ * @brief CCS811 Air Quality Sensor Test Application
  *
- * This program tests basic GPIO functionality and LED control on the
- * Raspberry Pi Pico. It's designed to work with the Pico Debug Probe
- * for step-through debugging and breakpoint testing.
+ * Reads eCO2 and TVOC data from the Joy-IT CCS811 sensor via I2C
+ * and outputs measurements via USB serial.
  *
  * Hardware:
  * - Raspberry Pi Pico (RP2040)
- * - Pico Debug Probe connected via SWD
- *
- * Onboard LED: GPIO 25 (standard Pico)
+ * - Joy-IT SEN-CCS811V1 sensor on I2C0 (GP4=SDA, GP5=SCL)
+ * - Pico Debug Probe for SWD debugging
  */
 
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "hardware/i2c.h"
+#include "ccs811.h"
 
-// Onboard LED pin (GPIO 25 for standard Pico)
-#define LED_PIN 25
+// I2C Configuration
+#define I2C_PORT        i2c0
+#define I2C_SDA_PIN     4
+#define I2C_SCL_PIN     5
+#define I2C_FREQ_HZ     100000  // 100 kHz standard mode
 
-// Test GPIO pins - choose unused pins for your setup
-#define TEST_OUTPUT_PIN 16
-#define TEST_INPUT_PIN 17
+// Onboard LED pin
+#define LED_PIN         25
 
-// Test counter for debugging
-volatile uint32_t loop_counter = 0;
-volatile bool led_state = false;
+// Measurement interval in milliseconds
+#define MEASURE_INTERVAL_MS     1000
+
+// Global sensor handle
+static ccs811_t sensor;
+
+// Measurement counter
+static uint32_t measurement_count = 0;
 
 /**
- * Initialize all GPIO pins for testing
+ * @brief Initialize I2C bus
  */
-void init_gpio(void) {
-    // Initialize onboard LED
-    gpio_init(LED_PIN);
-    gpio_set_dir(LED_PIN, GPIO_OUT);
-    gpio_put(LED_PIN, 0);
-
-    // Initialize test output pin
-    gpio_init(TEST_OUTPUT_PIN);
-    gpio_set_dir(TEST_OUTPUT_PIN, GPIO_OUT);
-    gpio_put(TEST_OUTPUT_PIN, 0);
-
-    // Initialize test input pin with pull-down
-    gpio_init(TEST_INPUT_PIN);
-    gpio_set_dir(TEST_INPUT_PIN, GPIO_IN);
-    gpio_pull_down(TEST_INPUT_PIN);
+static void init_i2c(void) {
+    i2c_init(I2C_PORT, I2C_FREQ_HZ);
+    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA_PIN);
+    gpio_pull_up(I2C_SCL_PIN);
 }
 
 /**
- * Toggle the onboard LED
- * Good breakpoint location for testing debug probe
+ * @brief Initialize onboard LED
  */
-__attribute__((noinline)) void toggle_led(void) {
+static void init_led(void) {
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+    gpio_put(LED_PIN, 0);
+}
+
+/**
+ * @brief Toggle LED state
+ */
+__attribute__((noinline)) static void toggle_led(void) {
+    static bool led_state = false;
     led_state = !led_state;
     gpio_put(LED_PIN, led_state);
 }
 
 /**
- * Test GPIO output functionality
- * Toggles test output pin and reads it back if looped to input
+ * @brief Print CSV header
  */
-bool test_gpio_output(void) {
-    // Set output high
-    gpio_put(TEST_OUTPUT_PIN, 1);
-    sleep_ms(10);
-
-    // If GPIO16 is connected to GPIO17, we can verify
-    bool read_high = gpio_get(TEST_INPUT_PIN);
-
-    // Set output low
-    gpio_put(TEST_OUTPUT_PIN, 0);
-    sleep_ms(10);
-
-    bool read_low = gpio_get(TEST_INPUT_PIN);
-
-    // If pins are connected: high should read 1, low should read 0
-    // If not connected: both will read based on pull-down (0)
-    return true; // Basic test always passes, check values in debugger
+static void print_header(void) {
+    printf("\n# CCS811 Sensor Data Log\n");
+    printf("# Format: count,eco2_ppm,tvoc_ppb,status,warmed_up,warmup_remaining_s\n");
+    printf("count,eco2_ppm,tvoc_ppb,status,warmed_up,warmup_remaining_s\n");
 }
 
 /**
- * Print system status - useful for USB serial debugging
+ * @brief Print measurement data in CSV format
  */
-void print_status(void) {
-    printf("\n=== Pico Test Status ===\n");
-    printf("Loop count: %lu\n", loop_counter);
-    printf("LED state: %s\n", led_state ? "ON" : "OFF");
-    printf("GPIO %d (input): %d\n", TEST_INPUT_PIN, gpio_get(TEST_INPUT_PIN));
-    printf("========================\n");
+static void print_measurement(const ccs811_data_t *data) {
+    bool warmed_up = ccs811_is_warmed_up(&sensor);
+    uint32_t warmup_remaining = ccs811_warmup_seconds_remaining(&sensor);
+
+    printf("%lu,%u,%u,%s,%s,%lu\n",
+           measurement_count,
+           data->eco2,
+           data->tvoc,
+           data->error ? "ERROR" : "OK",
+           warmed_up ? "true" : "false",
+           warmup_remaining);
+}
+
+/**
+ * @brief Print sensor error details
+ */
+static void print_error(uint8_t error_id) {
+    printf("[ERROR] Sensor error flags: 0x%02X\n", error_id);
+
+    if (error_id & CCS811_ERROR_WRITE_REG)
+        printf("  - Invalid register write\n");
+    if (error_id & CCS811_ERROR_READ_REG)
+        printf("  - Invalid register read\n");
+    if (error_id & CCS811_ERROR_MEASMODE)
+        printf("  - Invalid measurement mode\n");
+    if (error_id & CCS811_ERROR_MAX_RESIST)
+        printf("  - Sensor resistance too high\n");
+    if (error_id & CCS811_ERROR_HEATER_FAULT)
+        printf("  - Heater fault\n");
+    if (error_id & CCS811_ERROR_HEATER_SUPPLY)
+        printf("  - Heater supply fault\n");
 }
 
 int main() {
     // Initialize stdio for USB serial output
     stdio_init_all();
 
-    // Wait for USB connection (optional, helps with serial monitor)
+    // Initialize hardware
+    init_led();
+    init_i2c();
+
+    // Wait for USB connection
     sleep_ms(2000);
 
-    printf("\n\n");
-    printf("================================\n");
-    printf("  Pico Test Project Started\n");
-    printf("  Debug Probe Ready\n");
-    printf("================================\n");
-    printf("\nInitializing GPIO...\n");
+    printf("\n");
+    printf("========================================\n");
+    printf("  CCS811 Air Quality Sensor Test\n");
+    printf("  Pico Test Project - embedded-device\n");
+    printf("========================================\n\n");
 
-    // Initialize GPIO pins
-    init_gpio();
+    printf("[INFO] Initializing I2C on GP%d (SDA) and GP%d (SCL)...\n",
+           I2C_SDA_PIN, I2C_SCL_PIN);
+    printf("[INFO] I2C frequency: %d Hz\n", I2C_FREQ_HZ);
 
-    printf("GPIO initialized successfully.\n");
-    printf("LED Pin: GPIO %d\n", LED_PIN);
-    printf("Test Output: GPIO %d\n", TEST_OUTPUT_PIN);
-    printf("Test Input: GPIO %d\n", TEST_INPUT_PIN);
-    printf("\nStarting main loop...\n");
-    printf("(Set breakpoints in toggle_led() for debug testing)\n\n");
+    // Initialize CCS811 sensor
+    printf("[INFO] Initializing CCS811 sensor at address 0x%02X...\n",
+           CCS811_I2C_ADDR_DEFAULT);
 
-    // Main loop
+    ccs811_error_t err = ccs811_init(&sensor, I2C_PORT, CCS811_I2C_ADDR_DEFAULT);
+
+    if (err != CCS811_OK) {
+        printf("[ERROR] Failed to initialize CCS811: %s\n", ccs811_error_string(err));
+        printf("[ERROR] Check wiring and sensor connection!\n");
+        printf("\n");
+        printf("Expected wiring:\n");
+        printf("  CCS811 VIN  -> Pico 3V3 (Pin 36)\n");
+        printf("  CCS811 GND  -> Pico GND (Pin 38)\n");
+        printf("  CCS811 SDA  -> Pico GP4 (Pin 6)\n");
+        printf("  CCS811 SCL  -> Pico GP5 (Pin 7)\n");
+        printf("  CCS811 WAKE -> Pico GND (Pin 38)\n");
+        printf("\n");
+
+        // Error indication: rapid LED blink
+        while (true) {
+            toggle_led();
+            sleep_ms(100);
+        }
+    }
+
+    // Sensor initialized successfully
+    uint8_t hw_id = ccs811_get_hw_id(&sensor);
+    printf("[INFO] CCS811 initialized successfully!\n");
+    printf("[INFO] Hardware ID: 0x%02X\n", hw_id);
+    printf("[WARN] Sensor needs 20 minutes to warm up for accurate readings.\n");
+    printf("\n");
+
+    // Print CSV header
+    print_header();
+
+    // Main measurement loop
     while (true) {
-        // Increment counter (watch this variable in debugger)
-        loop_counter++;
+        // Check if data is ready
+        if (ccs811_data_ready(&sensor)) {
+            ccs811_data_t data;
+            err = ccs811_read_data(&sensor, &data);
 
-        // Toggle LED - good place for breakpoint
-        toggle_led();  // <-- Set breakpoint here
-
-        // Run GPIO test
-        test_gpio_output();
-
-        // Print status every 10 iterations
-        if (loop_counter % 10 == 0) {
-            print_status();
+            if (err == CCS811_OK) {
+                measurement_count++;
+                print_measurement(&data);
+                toggle_led();  // Toggle LED on successful read
+            } else if (err == CCS811_ERR_SENSOR) {
+                printf("[ERROR] Sensor reported error\n");
+                print_error(data.error_id);
+            } else {
+                printf("[ERROR] Failed to read data: %s\n", ccs811_error_string(err));
+            }
         }
 
-        // Wait 500ms between toggles (LED blinks at 1Hz)
-        sleep_ms(500);
+        // Wait for next measurement interval
+        sleep_ms(MEASURE_INTERVAL_MS);
     }
 
     return 0;

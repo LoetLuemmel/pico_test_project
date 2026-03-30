@@ -14,6 +14,12 @@ pico_sdk_init()
 # Add executable
 add_executable(pico_test
     main.c
+    src/drivers/ccs811.c
+)
+
+# Include directories
+target_include_directories(pico_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/drivers
 )
 
 # Pull in common dependencies
@@ -21,6 +27,7 @@ target_link_libraries(pico_test
     pico_stdlib
     hardware_gpio
     hardware_adc
+    hardware_i2c
 )
 
 # Enable USB output, disable UART output (can be changed)
