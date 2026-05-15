@@ -82,6 +82,18 @@ Optional UART for serial debugging:
 | UART TX | GP1 | Pin 2 |
 | UART RX | GP0 | Pin 1 |
 
+
+### Pin Connections
+
+  CCS811 Sensor           Raspberry Pi Pico
+  ═══════════════════════════════════════════
+  VCC      ────────────── 3V3 OUT (Pin 36)
+  GND      ────────────── GND (Pin 38)
+  SDA      ────────────── GP4 (Pin 6)
+  SCL      ────────────── GP5 (Pin 7)
+  WAKE     ────────────── GP6 (Pin 9) ← Iteration 6
+  INT      ────────────── GP6 (Pin 9) ← Optional/ungenutz
+
 ### Test GPIO Wiring (Optional)
 
 For loopback GPIO testing, connect:
